@@ -2,5 +2,14 @@ spring:
   application:
     name: demo-orchestrator
 
+coordinator:
+  base-url: http://localhost:8081
+
+order-service:
+  base-url: http://localhost:8083
+
+payment-service:
+  base-url: http://localhost:8084
+
 server:
   port: 8082

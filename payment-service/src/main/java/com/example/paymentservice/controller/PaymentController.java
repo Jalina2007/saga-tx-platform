@@ -1,8 +1,8 @@
-package com.example.orderservice.controller;
+package com.example.paymentservice.controller;
 
-import com.example.orderservice.client.CoordinatorClient;
-import com.example.orderservice.dto.RegisterStepRequest;
-import com.example.orderservice.service.OrderService;
+import com.example.paymentservice.client.CoordinatorClient;
+import com.example.paymentservice.dto.RegisterStepRequest;
+import com.example.paymentservice.service.PaymentService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
@@ -15,56 +15,55 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.Map;
 
 @RestController
-@RequestMapping("/orders")
-public class OrderController {
+@RequestMapping("/payments")
+public class PaymentController {
 
-    private static final Logger log = LoggerFactory.getLogger(OrderController.class);
+    private static final Logger log = LoggerFactory.getLogger(PaymentController.class);
 
-    private final OrderService orderService;
+    private final PaymentService paymentService;
     private final CoordinatorClient coordinatorClient;
 
-    public OrderController(
-            OrderService orderService,
+    public PaymentController(
+            PaymentService paymentService,
             CoordinatorClient coordinatorClient
     ) {
-        this.orderService = orderService;
+        this.paymentService = paymentService;
         this.coordinatorClient = coordinatorClient;
     }
 
-    @PostMapping
-    public ResponseEntity<String> createOrder(
-            @RequestHeader("X-XID") String xid,
-            @RequestBody Map<String, String> body
+    @PostMapping("/charge")
+    public ResponseEntity<String> charge(@RequestHeader("X-XID") String xid, @RequestBody Map<String, String> body
     ) {
         String orderRef = requireOrderRef(body);
-        log.info("XID: {} - Processing order for {}", xid, orderRef);
+        log.info("XID: {} - Processing payment for {}", xid, orderRef);
+
         Long stepId = coordinatorClient.registerStep(xid, buildStep(orderRef));
 
         try {
-            orderService.createOrder(orderRef);
+            paymentService.charge(orderRef);
             coordinatorClient.markSuccess(xid, stepId);
         } catch (RuntimeException exception) {
             coordinatorClient.markFailure(xid, stepId, exception.getMessage());
             throw exception;
         }
 
-        return ResponseEntity.ok("Order created");
+        return ResponseEntity.ok("Payment charged");
     }
 
-    @PostMapping("/compensate/cancel")
-    public ResponseEntity<String> cancelOrder(@RequestBody Map<String, String> body) {
-        orderService.cancelOrder(requireOrderRef(body));
-        return ResponseEntity.ok("Order cancelled");
+    @PostMapping("/compensate/refund")
+    public ResponseEntity<String> refund(@RequestBody Map<String, String> body) {
+        paymentService.refund(requireOrderRef(body));
+        return ResponseEntity.ok("Refunded");
     }
 
     private RegisterStepRequest buildStep(String orderRef) {
         RegisterStepRequest step = new RegisterStepRequest();
         String payload = toPayload(orderRef);
 
-        step.setServiceName("order-service");
-        step.setActionName("/orders");
-        step.setCompensationName("/orders/compensate/cancel");
-        step.setStepOrder(1);
+        step.setServiceName("payment-service");
+        step.setActionName("/payments/charge");
+        step.setCompensationName("/payments/compensate/refund");
+        step.setStepOrder(2);
         step.setRequestPayload(payload);
         step.setCompensationPayload(payload);
 

@@ -48,7 +48,7 @@ class TransactionControllerIntegrationTests {
                 .getContentAsString()
                 .replaceAll(".*\"xid\":\"([^\"]+)\".*", "$1");
 
-        String stepId = mockMvc.perform(post("/api/tx/{xid}/steps", xid)
+        String orderStepId = mockMvc.perform(post("/api/tx/{xid}/steps", xid)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -67,7 +67,26 @@ class TransactionControllerIntegrationTests {
                 .getContentAsString()
                 .replaceAll(".*\"stepId\":(\\d+).*", "$1");
 
-        mockMvc.perform(post("/api/tx/{xid}/steps/{stepId}/success", xid, stepId)
+        String paymentStepId = mockMvc.perform(post("/api/tx/{xid}/steps", xid)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "serviceName": "payment-service",
+                                  "actionName": "/payments/charge",
+                                  "compensationName": "/payments/compensate/refund",
+                                  "stepOrder": 2,
+                                  "requestPayload": "orderRef=ORD-001",
+                                  "compensationPayload": "orderRef=ORD-001"
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("PENDING"))
+                .andReturn()
+                .getResponse()
+                .getContentAsString()
+                .replaceAll(".*\"stepId\":(\\d+).*", "$1");
+
+        mockMvc.perform(post("/api/tx/{xid}/steps/{stepId}/success", xid, orderStepId)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -78,12 +97,27 @@ class TransactionControllerIntegrationTests {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("SUCCESS"));
 
+        mockMvc.perform(post("/api/tx/{xid}/steps/{stepId}/success", xid, paymentStepId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "status": "SUCCESS",
+                                  "message": "Payment charged"
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("SUCCESS"));
+
         mockMvc.perform(get("/api/tx/{xid}", xid))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.xid").value(xid))
                 .andExpect(jsonPath("$.status").value("IN_PROGRESS"))
-                .andExpect(jsonPath("$.steps[0].stepId").value(Integer.parseInt(stepId)))
-                .andExpect(jsonPath("$.steps[0].status").value("SUCCESS"));
+                .andExpect(jsonPath("$.steps[0].stepId").value(Integer.parseInt(orderStepId)))
+                .andExpect(jsonPath("$.steps[0].serviceName").value("order-service"))
+                .andExpect(jsonPath("$.steps[0].status").value("SUCCESS"))
+                .andExpect(jsonPath("$.steps[1].stepId").value(Integer.parseInt(paymentStepId)))
+                .andExpect(jsonPath("$.steps[1].serviceName").value("payment-service"))
+                .andExpect(jsonPath("$.steps[1].status").value("SUCCESS"));
     }
 
     @Test
