@@ -13,8 +13,12 @@ import com.example.coordinator.exception.StepNotFoundException;
 import com.example.coordinator.exception.TransactionNotFoundException;
 import com.example.coordinator.repository.GlobalTransactionRepository;
 import com.example.coordinator.repository.TransactionStepRepository;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.client.RestTemplate;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -25,13 +29,13 @@ public class TransactionCoordinatorService {
 
     private final GlobalTransactionRepository globalTransactionRepository;
     private final TransactionStepRepository transactionStepRepository;
+    private final RestTemplate restTemplate;
 
-    public TransactionCoordinatorService(
-            GlobalTransactionRepository globalTransactionRepository,
-            TransactionStepRepository transactionStepRepository
+    public TransactionCoordinatorService(GlobalTransactionRepository globalTransactionRepository, TransactionStepRepository transactionStepRepository, RestTemplate restTemplate
     ) {
         this.globalTransactionRepository = globalTransactionRepository;
         this.transactionStepRepository = transactionStepRepository;
+        this.restTemplate = restTemplate;
     }
 
     @Transactional
@@ -52,8 +56,8 @@ public class TransactionCoordinatorService {
     public StepStateResponse registerStep(String xid, RegisterStepRequest request) {
         GlobalTransaction transaction = getTransactionEntity(xid);
 
-        if (transaction.getStatus() == GlobalTxStatus.FAILED) {
-            throw new IllegalArgumentException("Cannot register steps; transaction failed. " + xid);
+        if (transaction.getStatus() != GlobalTxStatus.STARTED && transaction.getStatus() != GlobalTxStatus.IN_PROGRESS) {
+            throw new IllegalArgumentException("Cannot register steps for transaction state " + transaction.getStatus() + ". " + xid);
         }
 
         TransactionStep step = new TransactionStep();
@@ -98,12 +102,39 @@ public class TransactionCoordinatorService {
         step.setUpdatedAt(now);
         transactionStepRepository.save(step);
 
-        transaction.setStatus(GlobalTxStatus.FAILED);
-        transaction.setFinishedAt(now);
+        transaction.setStatus(GlobalTxStatus.COMPENSATING);
         transaction.setFailureReason(request.message());
         globalTransactionRepository.save(transaction);
 
+        compensate(xid);
+
         return toStepState(step);
+    }
+
+    @Transactional
+    public void compensate(String xid) {
+        List<TransactionStep> steps = transactionStepRepository.findByXidOrderByStepOrderDesc(xid);
+
+        for (TransactionStep step : steps) {
+            if (step.getStatus() != StepStatus.SUCCESS) {
+                continue;
+            }
+
+            try {
+                callCompensation(step);
+                step.setStatus(StepStatus.COMPENSATED);
+            } catch (RuntimeException exception) {
+                step.setStatus(StepStatus.COMPENSATION_FAILED);
+            }
+
+            step.setUpdatedAt(LocalDateTime.now());
+            transactionStepRepository.save(step);
+        }
+
+        GlobalTransaction transaction = getTransactionEntity(xid);
+        transaction.setStatus(GlobalTxStatus.COMPENSATED);
+        transaction.setFinishedAt(LocalDateTime.now());
+        globalTransactionRepository.save(transaction);
     }
 
     @Transactional(readOnly = true)
@@ -114,14 +145,7 @@ public class TransactionCoordinatorService {
                 .map(this::toStepState)
                 .toList();
 
-        return new TransactionStateResponse(
-                transaction.getXid(),
-                transaction.getStatus().name(),
-                transaction.getFailureReason(),
-                transaction.getStartedAt(),
-                transaction.getFinishedAt(),
-                steps
-        );
+        return new TransactionStateResponse(transaction.getXid(), transaction.getStatus().name(), transaction.getFailureReason(), transaction.getStartedAt(), transaction.getFinishedAt(), steps);
     }
 
     private GlobalTransaction getTransactionEntity(String xid) {
@@ -140,14 +164,27 @@ public class TransactionCoordinatorService {
         return step;
     }
 
+    private void callCompensation(TransactionStep step) {
+        String url = "http://localhost:" + resolvePort(step.getServiceName()) + step.getCompensationName();
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+
+        String payload = step.getCompensationPayload();
+        HttpEntity<String> request = new HttpEntity<>(payload == null ? "{}" : payload, headers);
+
+        restTemplate.postForObject(url, request, String.class);
+    }
+
+    private int resolvePort(String serviceName) {
+        return switch (serviceName) {
+            case "order-service" -> 8083;
+            case "payment-service" -> 8084;
+            case "inventory-service" -> 8085;
+            default -> throw new RuntimeException("Unknown service: " + serviceName);
+        };
+    }
+
     private StepStateResponse toStepState(TransactionStep step) {
-        return new StepStateResponse(
-                step.getStepId(),
-                step.getServiceName(),
-                step.getActionName(),
-                step.getCompensationName(),
-                step.getStepOrder(),
-                step.getStatus().name()
-        );
+        return new StepStateResponse(step.getStepId(), step.getServiceName(), step.getActionName(), step.getCompensationName(), step.getStepOrder(), step.getStatus().name());
     }
 }

@@ -8,4 +8,6 @@ import java.util.List;
 public interface TransactionStepRepository extends JpaRepository<TransactionStep, Long> {
 
     List<TransactionStep> findByXidOrderByStepOrderAsc(String xid);
+
+    List<TransactionStep> findByXidOrderByStepOrderDesc(String xid);
 }

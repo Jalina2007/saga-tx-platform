@@ -9,11 +9,17 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
+import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.web.client.RestTemplate;
 
 import java.time.LocalDateTime;
 
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
+import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -32,10 +38,16 @@ class TransactionControllerIntegrationTests {
     @Autowired
     private TransactionStepRepository transactionStepRepository;
 
+    @Autowired
+    private RestTemplate restTemplate;
+
+    private MockRestServiceServer compensationServer;
+
     @BeforeEach
     void setUp() {
         transactionStepRepository.deleteAll();
         globalTransactionRepository.deleteAll();
+        compensationServer = MockRestServiceServer.bindTo(restTemplate).build();
     }
 
     @Test
@@ -155,9 +167,106 @@ class TransactionControllerIntegrationTests {
 
         mockMvc.perform(get("/api/tx/{xid}", transaction.getXid()))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.status").value("FAILED"))
+                .andExpect(jsonPath("$.status").value("COMPENSATED"))
                 .andExpect(jsonPath("$.failureReason").value("Payment declined"))
                 .andExpect(jsonPath("$.finishedAt").isNotEmpty());
+    }
+
+    @Test
+    void shouldCompensateSuccessfulStepsInReverseOrderWhenInventoryFails() throws Exception {
+        compensationServer.expect(requestTo("http://localhost:8084/payments/compensate/refund"))
+                .andExpect(method(HttpMethod.POST))
+                .andRespond(withSuccess("Refunded", MediaType.TEXT_PLAIN));
+
+        compensationServer.expect(requestTo("http://localhost:8083/orders/compensate/cancel"))
+                .andExpect(method(HttpMethod.POST))
+                .andRespond(withSuccess("Order cancelled", MediaType.TEXT_PLAIN));
+
+        String xid = mockMvc.perform(post("/api/tx/begin"))
+                .andExpect(status().isOk())
+                .andReturn()
+                .getResponse()
+                .getContentAsString()
+                .replaceAll(".*\"xid\":\"([^\"]+)\".*", "$1");
+
+        String orderStepId = registerStep(xid, """
+                {
+                  "serviceName": "order-service",
+                  "actionName": "/orders",
+                  "compensationName": "/orders/compensate/cancel",
+                  "stepOrder": 1,
+                  "requestPayload": "{\\"orderRef\\":\\"ORD-FAIL-001\\"}",
+                  "compensationPayload": "{\\"orderRef\\":\\"ORD-FAIL-001\\"}"
+                }
+                """);
+
+        String paymentStepId = registerStep(xid, """
+                {
+                  "serviceName": "payment-service",
+                  "actionName": "/payments/charge",
+                  "compensationName": "/payments/compensate/refund",
+                  "stepOrder": 2,
+                  "requestPayload": "{\\"orderRef\\":\\"ORD-FAIL-001\\"}",
+                  "compensationPayload": "{\\"orderRef\\":\\"ORD-FAIL-001\\"}"
+                }
+                """);
+
+        String inventoryStepId = registerStep(xid, """
+                {
+                  "serviceName": "inventory-service",
+                  "actionName": "/inventory/reserve",
+                  "compensationName": "/inventory/compensate/release",
+                  "stepOrder": 3,
+                  "requestPayload": "{\\"orderRef\\":\\"ORD-FAIL-001\\"}",
+                  "compensationPayload": "{\\"orderRef\\":\\"ORD-FAIL-001\\"}"
+                }
+                """);
+
+        mockMvc.perform(post("/api/tx/{xid}/steps/{stepId}/success", xid, orderStepId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "status": "SUCCESS",
+                                  "message": "Order created"
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("SUCCESS"));
+
+        mockMvc.perform(post("/api/tx/{xid}/steps/{stepId}/success", xid, paymentStepId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "status": "SUCCESS",
+                                  "message": "Payment charged"
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("SUCCESS"));
+
+        mockMvc.perform(post("/api/tx/{xid}/steps/{stepId}/failure", xid, inventoryStepId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "status": "FAILED",
+                                  "message": "Inventory unavailable"
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("FAILED"));
+
+        compensationServer.verify();
+
+        mockMvc.perform(get("/api/tx/{xid}", xid))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("COMPENSATED"))
+                .andExpect(jsonPath("$.failureReason").value("Inventory unavailable"))
+                .andExpect(jsonPath("$.steps[0].serviceName").value("order-service"))
+                .andExpect(jsonPath("$.steps[0].status").value("COMPENSATED"))
+                .andExpect(jsonPath("$.steps[1].serviceName").value("payment-service"))
+                .andExpect(jsonPath("$.steps[1].status").value("COMPENSATED"))
+                .andExpect(jsonPath("$.steps[2].serviceName").value("inventory-service"))
+                .andExpect(jsonPath("$.steps[2].status").value("FAILED"));
     }
 
     @Test
@@ -165,5 +274,16 @@ class TransactionControllerIntegrationTests {
         mockMvc.perform(get("/api/tx/{xid}", "missing-xid"))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.message").value("Transaction not found: missing-xid"));
+    }
+
+    private String registerStep(String xid, String body) throws Exception {
+        return mockMvc.perform(post("/api/tx/{xid}/steps", xid)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk())
+                .andReturn()
+                .getResponse()
+                .getContentAsString()
+                .replaceAll(".*\"stepId\":(\\d+).*", "$1");
     }
 }

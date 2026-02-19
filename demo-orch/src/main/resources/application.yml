@@ -11,5 +11,8 @@ order-service:
 payment-service:
   base-url: http://localhost:8084
 
+inventory-service:
+  base-url: http://localhost:8085
+
 server:
   port: 8082

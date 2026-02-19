@@ -21,17 +21,20 @@ public class CheckoutService {
     private final String coordinatorBaseUrl;
     private final String orderServiceBaseUrl;
     private final String paymentServiceBaseUrl;
+    private final String inventoryServiceBaseUrl;
 
     public CheckoutService(
             RestTemplate restTemplate,
             @Value("${coordinator.base-url:http://localhost:8081}") String coordinatorBaseUrl,
             @Value("${order-service.base-url:http://localhost:8083}") String orderServiceBaseUrl,
-            @Value("${payment-service.base-url:http://localhost:8084}") String paymentServiceBaseUrl
+            @Value("${payment-service.base-url:http://localhost:8084}") String paymentServiceBaseUrl,
+            @Value("${inventory-service.base-url:http://localhost:8085}") String inventoryServiceBaseUrl
     ) {
         this.restTemplate = restTemplate;
         this.coordinatorBaseUrl = coordinatorBaseUrl;
         this.orderServiceBaseUrl = orderServiceBaseUrl;
         this.paymentServiceBaseUrl = paymentServiceBaseUrl;
+        this.inventoryServiceBaseUrl = inventoryServiceBaseUrl;
     }
 
     public void process(String orderRef) {
@@ -56,5 +59,6 @@ public class CheckoutService {
 
         restTemplate.postForObject(orderServiceBaseUrl + "/orders", request, String.class);
         restTemplate.postForObject(paymentServiceBaseUrl + "/payments/charge", request, String.class);
+        restTemplate.postForObject(inventoryServiceBaseUrl + "/inventory/reserve", request, String.class);
     }
 }
